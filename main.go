@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -18,6 +21,7 @@ const stateFile = "state.json"
 type Config struct {
 	BotToken          string `json:"bot_token"`            // Токен бота (Telegram или Pusk)
 	APIURL            string `json:"api_url"`              // База Pusk, например https://pusk.example.com. Пусто = Telegram
+	Channel           string `json:"channel"`              // Имя канала Pusk для уведомлений. Пусто = чат с ботом
 	CheckCursorMillis string `json:"check_cursor_setting"` // Интервал проверки курсора (мс)
 }
 
@@ -28,6 +32,9 @@ type State struct {
 
 var (
 	bot           *tgbotapi.BotAPI
+	apiBase       string // база Pusk без /bot... (для нестандартных методов)
+	botToken      string
+	channelName   string // канал для уведомлений (Pusk-расширение sendChannel)
 	chatID        int64
 	chatMutex     sync.Mutex
 	cursorWatcher *CursorWatcher
@@ -108,10 +115,50 @@ func saveState(st State) error {
 	return os.WriteFile(stateFile, data, 0o600)
 }
 
-// notify отправляет уведомление в сохранённый чат
+// sendToChannel отправляет сообщение в канал Pusk (нестандартный метод sendChannel)
+func sendToChannel(name, text string) error {
+	payload, err := json.Marshal(map[string]string{"channel": name, "text": text})
+	if err != nil {
+		return err
+	}
+
+	url := fmt.Sprintf("%s/bot%s/sendChannel", apiBase, botToken)
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Post(url, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	var out struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return fmt.Errorf("ответ не разобран (HTTP %d): %w", resp.StatusCode, err)
+	}
+	if !out.OK {
+		return fmt.Errorf("pusk: %s (HTTP %d)", out.Description, resp.StatusCode)
+	}
+	return nil
+}
+
+// notify отправляет уведомление: в канал, если он задан, иначе в чат с ботом
 func notify(text string) {
+	if bot == nil {
+		return
+	}
+
+	if channelName != "" && apiBase != "" {
+		err := sendToChannel(channelName, text)
+		if err == nil {
+			return
+		}
+		log.Printf("канал %q недоступен, шлю в чат: %v", channelName, err)
+	}
+
 	id := currentChatID()
-	if bot == nil || id == 0 {
+	if id == 0 {
 		log.Printf("уведомление не отправлено (чат неизвестен): %s", text)
 		return
 	}
@@ -160,18 +207,28 @@ func main() {
 	}
 
 	// Токен и адрес бота: Pusk или Telegram
+	botToken = config.BotToken
+	apiBase = strings.TrimRight(strings.TrimSpace(config.APIURL), "/")
+	channelName = strings.TrimSpace(config.Channel)
+
 	botInstance, err := tgbotapi.NewBotAPIWithAPIEndpoint(config.BotToken, apiEndpoint(config.APIURL))
 	if err != nil {
 		log.Fatalf("Ошибка при создании бота: %v", err)
 	}
 	bot = botInstance
 
-	if config.APIURL == "" {
+	if apiBase == "" {
 		log.Printf("Бэкенд: Telegram (api.telegram.org)")
 	} else {
-		log.Printf("Бэкенд: Pusk (%s)", strings.TrimRight(config.APIURL, "/"))
+		log.Printf("Бэкенд: Pusk (%s)", apiBase)
 	}
 	log.Printf("Authorized on account %s", bot.Self.UserName)
+
+	if channelName != "" {
+		log.Printf("Уведомления: канал %q", channelName)
+	} else {
+		log.Printf("Уведомления: чат с ботом")
+	}
 
 	// Восстанавливаем чат, чтобы охрана работала сразу после перезапуска
 	if st := loadState(); st.ChatID != 0 {
@@ -246,6 +303,7 @@ func handleCallback(cb *tgbotapi.CallbackQuery, checkMillis int) {
 		id = cb.Message.Chat.ID
 		setChatID(id)
 	}
+	log.Printf("callback: data=%q chat=%d", cb.Data, id)
 
 	answer := ""
 	switch cb.Data {
@@ -295,11 +353,13 @@ func handleGuardMode(id int64, checkMillis int) {
 	if cursorWatcher.IsRunning() {
 		cursorWatcher.Stop()
 		watcherMutex.Unlock()
+		log.Printf("режим охраны выключен")
 		send(id, "Режим охраны деактивирован.")
 		return
 	}
 	cursorWatcher.Start()
 	watcherMutex.Unlock()
 
+	log.Printf("режим охраны включён")
 	send(id, "Режим охраны активирован. Отслеживаю курсор...")
 }

@@ -1,5 +1,6 @@
 {
     "bot_token": "PUSK_BOT_TOKEN",
     "api_url": "https://pusk.example.com",
+    "channel": "",
     "check_cursor_setting": "1000"
 }
