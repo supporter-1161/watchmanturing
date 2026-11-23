@@ -1,3 +1,7 @@
+//go:build ignore
+
+// Отдельная утилита для ручной проверки: go run lock-cheker.go
+// Собирается отдельно, в основной бинарник не входит.
 package main
 
 import (

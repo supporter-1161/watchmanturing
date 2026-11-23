@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-vgo/robotgo"
@@ -9,7 +10,7 @@ import (
 
 // CursorWatcher представляет состояние отслеживания курсора
 type CursorWatcher struct {
-	isRunning   bool
+	isRunning   atomic.Bool
 	checkMillis int
 	targetX     int
 	targetY     int
@@ -18,21 +19,24 @@ type CursorWatcher struct {
 // NewCursorWatcher создает новый экземпляр CursorWatcher
 func NewCursorWatcher(checkMillis int, startX, startY int) *CursorWatcher {
 	return &CursorWatcher{
-		isRunning:   false,
 		checkMillis: checkMillis,
 		targetX:     startX,
 		targetY:     startY,
 	}
 }
 
+// IsRunning сообщает, запущено ли наблюдение
+func (cw *CursorWatcher) IsRunning() bool {
+	return cw.isRunning.Load()
+}
+
 // Start запускает отслеживание курсора
 func (cw *CursorWatcher) Start() {
-	if cw.isRunning {
+	if !cw.isRunning.CompareAndSwap(false, true) {
 		fmt.Println("Курсор уже отслеживается!")
 		return
 	}
 
-	cw.isRunning = true
 	fmt.Println("🔥 Запущено отслеживание курсора!")
 
 	go func() {
@@ -42,12 +46,12 @@ func (cw *CursorWatcher) Start() {
 
 		checkInterval := time.Duration(cw.checkMillis) * time.Millisecond
 
-		for cw.isRunning {
+		for cw.isRunning.Load() {
 			currentX, currentY := robotgo.GetMousePos()
 			if currentX != cw.targetX || currentY != cw.targetY {
 				fmt.Printf("🚨 Курсор сдвинулся! Новая позиция: (%d, %d)\n", currentX, currentY)
 				cw.targetX, cw.targetY = currentX, currentY // Обновляем целевую позицию
-				onCursorMoved(fmt.Sprintf("Курсор сдвинулся! Новая позиция: (%d, %d)", currentX, currentY))
+				notify(fmt.Sprintf("Курсор сдвинулся! Новая позиция: (%d, %d)", currentX, currentY))
 			}
 			time.Sleep(checkInterval)
 		}
@@ -56,11 +60,10 @@ func (cw *CursorWatcher) Start() {
 
 // Stop останавливает отслеживание курсора
 func (cw *CursorWatcher) Stop() {
-	if !cw.isRunning {
+	if !cw.isRunning.CompareAndSwap(true, false) {
 		fmt.Println("Курсор не отслеживается!")
 		return
 	}
 
-	cw.isRunning = false
 	fmt.Println("❌ Отслеживание курсора остановлено!")
 }
